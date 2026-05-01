@@ -1,0 +1,20 @@
+# Shared model and data settings. Stage configs override training-specific keys.
+
+model:
+  llm_name: "Qwen/Qwen2.5-1.5B-Instruct"
+  vision_checkpoint: "../clip_model/best_model.pth"   # relative to fakedet_vlm/
+  vision_dim: 768
+  num_visual_tokens: 196
+  image_size: 224
+  load_in_4bit: true
+  torch_dtype: "bfloat16"
+
+data:
+  train_json: "data/train.json"
+  val_json: "data/val.json"
+  images_dir: "data/images"
+  max_length: 1024
+
+system:
+  seed: 42
+  output_root: "runs"

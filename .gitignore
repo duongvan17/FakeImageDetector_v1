@@ -1,32 +1,30 @@
-# Virtual environment
-.venv/
-venv/
-env/
+# Large model checkpoints — uploaded separately to HuggingFace Hub.
+# GitHub rejects files > 100 MB and best_model.pth is ~1 GB.
+clip_model/
 
 # IDE
 .idea/
 .vscode/
-*.swp
 
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.egg-info/
-dist/
-build/
-
-# Model checkpoints (too large for git)
-checkpoints/
-*.pth
-*.pt
-
-# Dataset (too large for git)
-dataset/
-political_data/
-test_samples/
-
-# Misc
+# OS
 .DS_Store
 Thumbs.db
-*.log
+
+# Generated artefacts
+runs/
+data/
+wandb/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example

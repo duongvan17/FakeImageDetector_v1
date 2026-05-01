@@ -1,0 +1,36 @@
+stage: 2
+output_subdir: "stage2_sft"
+
+# Path to the projector checkpoint produced by stage 1.
+stage1_projector: "runs/stage1_align/projector.pt"
+
+train:
+  trainable: ["projector", "llm_lora"]
+  num_train_epochs: 2
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 16
+  # Two separate LRs (handled in stage2.py): projector keeps a higher rate
+  # because it's small and randomly initialised at stage 1 boundaries.
+  projector_lr: 2.0e-4
+  lora_lr: 2.0e-5
+  weight_decay: 0.0
+  warmup_ratio: 0.03
+  lr_scheduler_type: "cosine"
+  bf16: true
+  fp16: false
+  gradient_checkpointing: true
+  logging_steps: 10
+  eval_steps: 500
+  save_steps: 500
+  save_total_limit: 2
+  optim: "paged_adamw_8bit"
+  early_stopping_patience: 3
+  remove_unused_columns: false
+  report_to: "none"
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+  bias: "none"

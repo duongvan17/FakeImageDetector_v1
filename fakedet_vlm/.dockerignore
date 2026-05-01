@@ -1,0 +1,13 @@
+.git
+.venv
+.idea
+__pycache__
+*.pyc
+runs/
+data/
+clip_model/
+.pytest_cache
+.ruff_cache
+*.log
+*.bin
+*.safetensors

@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual env
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor
+.idea/
+.vscode/
+
+# Project artefacts (large, regeneratable)
+runs/
+data/
+wandb/
+
+# Secrets
+.env
+.env.*
+!.env.example
