@@ -17,7 +17,7 @@ Targeting pod #30709378 (Hungary, 1x RTX 4090, $0.340/hr) — nhưng quy trình
 4. [Rent pod](#4-rent-pod)
 5. [Kết nối vào pod](#5-kết-nối-vào-pod)
 6. [Setup môi trường](#6-setup-môi-trường-trên-pod)
-7. [Train](#7-train)
+7. [Train (cách tốt nhất ⭐)](#7-train)
 8. [Theo dõi tiến trình](#8-theo-dõi-tiến-trình)
 9. [Download model về local](#9-download-model-về-local)
 10. [Stop pod](#10-stop-pod)
@@ -239,7 +239,90 @@ Nếu lỗi gì → xem [Troubleshooting](#11-troubleshooting).
 
 ## 7. Train
 
-### 7.1 Mở tmux
+### 7.0 Hiểu flow trước khi chạy — RẤT QUAN TRỌNG
+
+Training là **2-stage tuần tự, KHÔNG phải 1 lệnh chạy 1 phát**:
+
+```
+[Stage 1: Projector Warmup]   4-5h trên 3090 Ti / 2-3h trên 4090
+  ↓ trainable: chỉ projector (3M params)
+  ↓ output: runs/stage1_align/projector.pt
+[Stage 2: LoRA SFT]            5-6h trên 3090 Ti / 3-4h trên 4090
+  ↓ trainable: projector + LoRA (15M params)
+  ↓ output: runs/stage2_sft/final/{adapter_model.safetensors, projector.pt}
+[Eval]                          20-30 phút
+  ↓ output: runs/stage2_sft/eval/{eval_metrics.json, eval_predictions.jsonl}
+```
+
+**Tại sao 2 stage?** Đây là best practice của LLaVA / FakeVLM:
+
+- Stage 1: align projector với LLM space trước. Nếu skip → projector random
+  output làm noise gradient signal cho LoRA → loss khó hội tụ
+- Stage 2: LLM (qua LoRA) học task dựa trên features đã align
+- Bỏ stage 1 → accuracy thấp 10-15% (không đáng tiết kiệm 3-4h)
+
+**Cơ chế resume**: HF Trainer auto save checkpoint mỗi 500 steps vào
+`runs/<stage>/checkpoint-XXXX/`. Nếu crash giữa chừng, resume với:
+
+```bash
+python -m fakedet_vlm.train.stage1 \
+    --base configs/base.yaml --stage configs/stage1.yaml \
+    --resume_from_checkpoint runs/stage1_align/checkpoint-2000
+```
+
+### 7.1 Cách train tốt nhất (recommended workflow)
+
+**Pattern**: Chạy từng lệnh, kiểm tra 1-2 phút đầu mỗi stage để chắc loss
+giảm bình thường, rồi detach tmux đi ngủ. KHÔNG chain `&&` cho lần đầu vì
+nếu stage 1 toang thì stage 2 cũng toang — đốt 6h vô ích.
+
+```bash
+# Pha A: chuẩn bị (~10s)
+tmux new -s train
+source .venv/bin/activate
+
+# Pha B: data (~30-60 phút, không cần GPU)
+make data
+# Kiểm tra log cuối: phải có "Train=XXXXX Val=XXXX" + per-category stats
+# Nếu chỉ vài trăm samples → có gì sai, dừng lại
+
+# Pha C: stage 1 (~4-5h trên 3090 Ti)
+make stage1
+# Xem log 2 phút đầu: loss bắt đầu ~4.3, giảm dần
+# Nếu sau 100 steps loss vẫn ~4.3 không giảm → có bug, Ctrl+C
+# OK rồi → Ctrl+B D detach, đi ngủ / đi làm việc khác
+
+# Pha D: kiểm tra stage 1 xong
+# Reattach: tmux a -t train
+# Cuối log phải thấy: "[stage1] saved projector → runs/stage1_align/projector.pt"
+# Loss epoch cuối phải <3.0 (ideal <2.5)
+ls -la runs/stage1_align/projector.pt
+# File phải tồn tại ~12 MB
+
+# Pha E: stage 2 (~5-6h)
+make stage2
+# Loss đầu ~3.0, cuối ~0.4-0.8
+# Sau 100 steps loss giảm dưới 2.5 → OK, detach
+# Nếu loss kẹt >2.5 → projector stage 1 có vấn đề, dừng debug
+
+# Pha F: eval (~30 phút)
+make eval
+# In overall + per-category metrics
+# Target: acc >0.85, F1 >0.80
+```
+
+**Nếu muốn chạy 1 phát đi ngủ luôn** (sau khi đã quen):
+
+```bash
+tmux new -s train
+source .venv/bin/activate
+make data && make stage1 && make stage2 && make eval
+# Ctrl+B D, sáng dậy xem kết quả
+```
+
+`&&` đảm bảo nếu lệnh nào fail thì dừng ngay, không tiếp tục.
+
+### 7.2 Mở tmux
 
 **RẤT QUAN TRỌNG** — tmux giữ tiến trình chạy ngay cả khi mất kết nối SSH.
 Không có tmux → mất mạng = kill train = mất tiền.
@@ -250,13 +333,13 @@ tmux new -s train
 
 Bạn sẽ thấy thanh xanh dưới cùng — đang trong tmux session tên "train".
 
-### 7.2 Activate venv (sau khi setup xong)
+### 7.3 Activate venv (sau khi setup xong)
 
 ```bash
 source .venv/bin/activate
 ```
 
-### 7.3 Tải FakeClue dataset
+### 7.4 Tải FakeClue dataset
 
 ```bash
 make data
@@ -273,7 +356,7 @@ make data
     ...
 ```
 
-### 7.4 Stage 1: Projector alignment (~2-3h)
+### 7.5 Stage 1: Projector alignment (~2-3h trên 4090, ~4-5h trên 3090 Ti)
 
 ```bash
 make stage1
@@ -294,7 +377,7 @@ Output cuối:
 [stage1] saved projector → runs/stage1_align/projector.pt
 ```
 
-### 7.5 Stage 2: LoRA SFT (~2-3h)
+### 7.6 Stage 2: LoRA SFT (~2-3h trên 4090, ~5-6h trên 3090 Ti)
 
 ```bash
 make stage2
@@ -314,7 +397,7 @@ Output cuối:
 [stage2] saved LoRA + projector + tokenizer → runs/stage2_sft/final
 ```
 
-### 7.6 Eval
+### 7.7 Eval
 
 ```bash
 make eval

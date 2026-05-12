@@ -17,6 +17,7 @@ trên HuggingFace → train → eval → deploy.
 5. [Sanity check vision tower](#5-sanity-check-vision-tower)
 6. [Tải dataset FakeClue](#6-tải-dataset-fakeclue)
 7. [Smoke test với 200 mẫu](#7-smoke-test-với-200-mẫu-trước)
+7.5. [Cách train tốt nhất ⭐](#75-hiểu-flow-training-trước-khi-train--recommended-workflow)
 8. [Train Stage 1: Projector alignment](#8-train-stage-1-projector-alignment)
 9. [Train Stage 2: LoRA SFT](#9-train-stage-2-lora-sft)
 10. [Đánh giá model](#10-đánh-giá-model)
@@ -238,6 +239,89 @@ Sẽ tạo ~180 mẫu train + ~20 val. Đủ để check:
 - Eval script chạy được
 
 Sau smoke test thành công → xóa và prep full dataset.
+
+---
+
+## 7.5. Hiểu flow training trước khi train — recommended workflow
+
+Training là **2-stage tuần tự, KHÔNG phải 1 lệnh chạy 1 phát**:
+
+```
+[Stage 1: Projector Warmup]   2-5h tùy GPU
+  ↓ trainable: chỉ projector MLP (3M params)
+  ↓ output: runs/stage1_align/projector.pt (~12 MB)
+[Stage 2: LoRA SFT]            3-6h tùy GPU
+  ↓ trainable: projector + LoRA (15M params)
+  ↓ output: runs/stage2_sft/final/{adapter_model.safetensors, projector.pt}
+[Eval]                          20-30 phút
+  ↓ output: runs/stage2_sft/eval/{metrics.json, predictions.jsonl}
+```
+
+**Tại sao chia 2 stage?** (best practice của LLaVA / FakeVLM):
+
+| | 1-stage (joint train) | 2-stage (cách hiện tại) |
+|---|---|---|
+| Vấn đề | Projector random + LoRA random → noise gradient | Stage 1 align projector trước, stage 2 LoRA học task |
+| Loss cuối | ~1.0-1.5 | ~0.4-0.8 |
+| Accuracy | 75-80% | 90%+ |
+
+→ Bỏ stage 1 không tiết kiệm thời gian — chỉ tệ accuracy.
+
+### Cách train tốt nhất (lần đầu)
+
+```bash
+# 1. Chuẩn bị
+tmux new -s train
+source .venv/bin/activate
+
+# 2. Tải data (~30-60 phút, không cần GPU)
+make data
+# Verify: phải in "Train=XXXXX Val=XXXX" + per-category stats
+
+# 3. Stage 1 (~2-5h)
+make stage1
+# Xem log 2 phút đầu: loss bắt đầu ~4.3, giảm dần
+# Nếu sau 100 steps loss không giảm → Ctrl+C, debug
+# OK rồi → Ctrl+B D detach, đi ngủ
+
+# 4. Verify stage 1 xong
+tmux a -t train
+# Cuối log: "[stage1] saved projector → runs/stage1_align/projector.pt"
+# Loss cuối phải <3.0 (ideal <2.5)
+ls -la runs/stage1_align/projector.pt   # ~12 MB
+
+# 5. Stage 2 (~3-6h)
+make stage2
+# Loss đầu ~3.0, cuối ~0.4-0.8
+# Detach lần nữa
+
+# 6. Eval (~30 phút)
+make eval
+# Target: acc >0.85, F1 >0.80
+```
+
+### Sau khi quen — chạy 1 phát đi ngủ
+
+```bash
+tmux new -s train
+source .venv/bin/activate
+make data && make stage1 && make stage2 && make eval
+# Ctrl+B D, sáng dậy xem kết quả
+```
+
+`&&` đảm bảo fail-fast: lệnh nào lỗi thì dừng ngay, không tiếp tục đốt GPU.
+
+### Resume khi crash
+
+HF Trainer auto save checkpoint mỗi 500 steps. Nếu crash giữa chừng:
+
+```bash
+python -m fakedet_vlm.train.stage1 \
+    --base configs/base.yaml --stage configs/stage1.yaml \
+    --resume_from_checkpoint runs/stage1_align/checkpoint-2000
+```
+
+Mất max 30-60 phút training time (~tương đương 500 steps).
 
 ---
 
