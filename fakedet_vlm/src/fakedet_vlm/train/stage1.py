@@ -48,12 +48,10 @@ def main() -> None:
     model.freeze_llm()
     model.unfreeze_projector()
 
-    if t_cfg.get("gradient_checkpointing"):
-        model.llm.gradient_checkpointing_enable()
-        # Required so gradients can flow back through frozen 4-bit weights
-        # to the projector inputs (embedding pathway).
-        if hasattr(model.llm, "enable_input_require_grads"):
-            model.llm.enable_input_require_grads()
+    # Gradient checkpointing is enabled by HF Trainer when training_args
+    # ``gradient_checkpointing=True``. Our VLM forwards the call to the LLM
+    # and also turns on ``enable_input_require_grads`` so gradients flow
+    # back to the projector through the frozen embedding table.
 
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"[stage1] trainable params = {n_train/1e6:.2f}M (projector only)")

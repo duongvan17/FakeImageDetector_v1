@@ -118,6 +118,35 @@ class FakeDetVLM(nn.Module):
         for p in self.projector.parameters():
             p.requires_grad = True
 
+    # ---------------------------------------------------- HF Trainer hooks
+    # HF Trainer calls these on ``self.model`` directly. Because FakeDetVLM
+    # is a plain nn.Module (not a PreTrainedModel), we forward to the wrapped
+    # LLM where the real implementation lives.
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        if hasattr(self.llm, "gradient_checkpointing_enable"):
+            if gradient_checkpointing_kwargs is None:
+                self.llm.gradient_checkpointing_enable()
+            else:
+                self.llm.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+                )
+        # Also ensure gradients flow through the (frozen) embedding to the
+        # projector inputs — required when the LLM is quantised + checkpointed.
+        if hasattr(self.llm, "enable_input_require_grads"):
+            self.llm.enable_input_require_grads()
+
+    def gradient_checkpointing_disable(self):
+        if hasattr(self.llm, "gradient_checkpointing_disable"):
+            self.llm.gradient_checkpointing_disable()
+
+    @property
+    def is_gradient_checkpointing(self) -> bool:
+        return bool(getattr(self.llm, "is_gradient_checkpointing", False))
+
+    def enable_input_require_grads(self):
+        if hasattr(self.llm, "enable_input_require_grads"):
+            self.llm.enable_input_require_grads()
+
     def trainable_param_groups(self) -> dict[str, list[nn.Parameter]]:
         groups = {"projector": [], "llm_lora": [], "other": []}
         for n, p in self.named_parameters():
