@@ -10,9 +10,10 @@ clip_model/
 .DS_Store
 Thumbs.db
 
-# Generated artefacts
-runs/
-data/
+# Generated artefacts (anchor to repo root — do NOT match src/fakedet_vlm/data/)
+/runs/
+/fakedet_vlm/runs/
+/fakedet_vlm/data/
 wandb/
 __pycache__/
 *.pyc

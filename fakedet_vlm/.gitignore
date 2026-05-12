@@ -19,9 +19,11 @@ venv/
 .idea/
 .vscode/
 
-# Project artefacts (large, regeneratable)
-runs/
-data/
+# Project artefacts (large, regeneratable).
+# Anchor with leading slash so we don't accidentally exclude the
+# ``src/fakedet_vlm/data/`` subpackage.
+/runs/
+/data/
 wandb/
 
 # Secrets
