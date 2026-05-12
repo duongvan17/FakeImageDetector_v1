@@ -39,10 +39,46 @@ class VLMTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
     def _save(self, output_dir: str | None = None, state_dict=None):
-        # Override to also persist the projector regardless of LoRA wrapping.
-        super()._save(output_dir, state_dict)
+        """Custom checkpoint that bypasses HF Trainer's default model dump.
+
+        Why bypass?  HF's default tries to serialise the whole VLM
+        (LLM + vision tower + projector) with ``safetensors``.  Qwen2.5 ties
+        ``embed_tokens`` and ``lm_head`` weights, and safetensors refuses to
+        save shared-memory tensors:
+
+            RuntimeError: Some tensors share memory, this will lead to
+            duplicate memory on disk ...
+
+        We only need to persist what is trainable anyway:
+          - projector.pt (always)
+          - LoRA adapter via ``llm.save_pretrained`` (stage 2 only — present
+            when the LLM is wrapped by PEFT)
+          - tokenizer (lightweight, useful for downstream inference)
+
+        The base LLM weights and the frozen ViT are never touched by training,
+        so re-loading them at inference time from their original sources is
+        fine and saves disk + dodges the tied-weights bug entirely.
+        """
         if output_dir is None:
             return
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+
         proj = getattr(self.model, "projector", None)
         if proj is not None:
-            torch.save(proj.state_dict(), Path(output_dir) / "projector.pt")
+            torch.save(proj.state_dict(), out / "projector.pt")
+
+        llm = getattr(self.model, "llm", None)
+        # PEFT-wrapped models expose ``peft_config`` and ``save_pretrained``.
+        if llm is not None and hasattr(llm, "peft_config") and hasattr(llm, "save_pretrained"):
+            llm.save_pretrained(str(out))
+
+        tok = getattr(self.model, "tokenizer", None)
+        if tok is not None:
+            try:
+                tok.save_pretrained(str(out))
+            except Exception:  # noqa: BLE001
+                pass  # tokenizer save is best-effort, not critical
+
+        # Persist the training arguments so resume picks them up.
+        torch.save(self.args, out / "training_args.bin")
