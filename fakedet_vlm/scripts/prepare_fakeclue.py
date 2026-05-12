@@ -87,16 +87,55 @@ def _normalize_records(src_records: list[dict], image_subset: set[str] | None) -
     return out
 
 
-def _extract_zip(zip_path: Path, target_dir: Path) -> set[str]:
-    """Extract all files; return the set of relative file paths extracted."""
+def _detect_top_prefix(names: list[str]) -> str | None:
+    """If every file in the zip lives under a single top-level dir like
+    ``train/`` or ``images/``, return that dir name (without trailing slash).
+    Otherwise return None."""
+    tops = set()
+    for n in names:
+        if "/" in n:
+            tops.add(n.split("/", 1)[0])
+        else:
+            return None  # at least one file at the root → no common prefix
+    return tops.pop() if len(tops) == 1 else None
+
+
+def _extract_zip(zip_path: Path, target_dir: Path, json_image_paths: set[str]) -> set[str]:
+    """Extract all files, auto-stripping a common top-level prefix if the
+    annotation JSON references paths without it.
+
+    Returns the set of paths *as they appear in the annotation JSON* (so the
+    caller can match them directly when normalising records).
+    """
     target_dir.mkdir(parents=True, exist_ok=True)
-    extracted = set()
+
     with zipfile.ZipFile(zip_path) as zf:
-        for info in tqdm(zf.infolist(), desc=f"extract {zip_path.name}"):
-            if info.is_dir():
+        infolist = [i for i in zf.infolist() if not i.is_dir()]
+        all_names = [i.filename for i in infolist]
+
+        top_prefix = _detect_top_prefix(all_names)
+        strip_prefix = None
+        if top_prefix and json_image_paths:
+            # If JSON already has the prefix, no need to strip.
+            sample = next(iter(json_image_paths))
+            if not sample.startswith(top_prefix + "/"):
+                strip_prefix = top_prefix
+                print(f"  zip top-level dir is {top_prefix!r}, "
+                      f"JSON paths don't have it → stripping on extract")
+
+        extracted = set()
+        for info in tqdm(infolist, desc=f"extract {zip_path.name}"):
+            out_name = info.filename
+            if strip_prefix and out_name.startswith(strip_prefix + "/"):
+                out_name = out_name[len(strip_prefix) + 1:]
+            if not out_name:
                 continue
-            zf.extract(info, target_dir)
-            extracted.add(info.filename)
+            target = target_dir / out_name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            extracted.add(out_name)
+
     return extracted
 
 
@@ -139,10 +178,34 @@ def main() -> None:
     else:
         test_zip_path = None
 
+    # Load JSON FIRST so the extractor can compare zip layout vs JSON refs.
+    with open(train_json_path, "r", encoding="utf-8") as f:
+        src_train = json.load(f)
+    train_json_paths = {r["image"] for r in src_train if r.get("image")}
+    print(f"      {len(src_train)} train records, {len(train_json_paths)} unique image paths")
+
+    if args.use_test_as_val:
+        with open(test_json_path, "r", encoding="utf-8") as f:
+            src_test = json.load(f)
+        test_json_paths = {r["image"] for r in src_test if r.get("image")}
+    else:
+        src_test = []
+        test_json_paths = set()
+
     print("\n[3/4] Extracting zips into data/images/")
-    extracted_train = _extract_zip(train_zip_path, images_dir)
+    extracted_train = _extract_zip(train_zip_path, images_dir, train_json_paths)
+    print(f"  extracted {len(extracted_train)} files")
+    overlap = len(extracted_train & train_json_paths)
+    print(f"  {overlap}/{len(train_json_paths)} JSON paths now resolve to extracted files")
+    if overlap == 0:
+        # Show a sample mismatch so the user can diagnose quickly.
+        print("  ERROR: no overlap between extracted files and JSON references!")
+        print(f"  Sample extracted: {sorted(extracted_train)[:3]}")
+        print(f"  Sample JSON paths: {sorted(train_json_paths)[:3]}")
+        raise SystemExit(1)
+
     if test_zip_path:
-        extracted_test = _extract_zip(test_zip_path, images_dir)
+        extracted_test = _extract_zip(test_zip_path, images_dir, test_json_paths)
     else:
         extracted_test = set()
 
@@ -156,13 +219,9 @@ def main() -> None:
             print(f"  warning: could not delete cached zips: {e}")
 
     print("\n[4/4] Building local annotations")
-    with open(train_json_path, "r", encoding="utf-8") as f:
-        src_train = json.load(f)
     train_records = _normalize_records(src_train, extracted_train)
 
     if args.use_test_as_val:
-        with open(test_json_path, "r", encoding="utf-8") as f:
-            src_test = json.load(f)
         val_records = _normalize_records(src_test, extracted_test)
     else:
         rng = random.Random(args.seed)
