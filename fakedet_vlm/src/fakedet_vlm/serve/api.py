@@ -59,6 +59,12 @@ def _load_model() -> dict[str, Any]:
         model.projector.load_state_dict(sd)
     model.eval()
 
+    # The 4-bit LLM is placed by device_map; vision tower + projector default
+    # to CPU. Move them to GPU so pixel_values from the request match.
+    if device == "cuda" and torch.cuda.is_available():
+        model.vision_tower = model.vision_tower.to(device)
+        model.projector = model.projector.to(device)
+
     transform = transforms.Compose([
         transforms.Resize((image_size, image_size),
                           interpolation=transforms.InterpolationMode.BICUBIC),

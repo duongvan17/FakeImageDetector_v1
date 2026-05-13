@@ -129,6 +129,16 @@ def main() -> None:
         model.projector.load_state_dict(sd)
     model.eval()
 
+    # The 4-bit LLM is placed on GPU by device_map="" in FakeDetVLM, but the
+    # vision tower and projector default to CPU.  HF Trainer auto-moves these
+    # during training; for standalone scripts we have to do it explicitly,
+    # otherwise the first conv2d in the ViT raises:
+    #   RuntimeError: Input type (torch.cuda.FloatTensor) and weight type
+    #                 (torch.FloatTensor) should be the same
+    if args.device == "cuda" and torch.cuda.is_available():
+        model.vision_tower = model.vision_tower.to(args.device)
+        model.projector = model.projector.to(args.device)
+
     processor = _build_processor(args.image_size)
     images_dir = Path(args.images_dir)
 

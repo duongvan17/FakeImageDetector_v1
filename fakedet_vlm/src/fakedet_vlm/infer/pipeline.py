@@ -45,6 +45,12 @@ class DeepfakeDetector:
 
         self.model.eval()
 
+        # Move vision tower + projector to the same device as the LLM. The
+        # 4-bit LLM is placed via device_map; the rest defaults to CPU.
+        if device == "cuda" and torch.cuda.is_available():
+            self.model.vision_tower = self.model.vision_tower.to(device)
+            self.model.projector = self.model.projector.to(device)
+
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size),
                               interpolation=transforms.InterpolationMode.BICUBIC),
