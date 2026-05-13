@@ -128,6 +128,9 @@ def main() -> None:
         sd = torch.load(args.projector, map_location="cpu")
         model.projector.load_state_dict(sd)
     model.eval()
+    if args.device == "cuda":
+        model.vision_tower = model.vision_tower.to(args.device)
+        model.projector = model.projector.to(args.device)
 
     # The 4-bit LLM is placed on GPU by device_map="" in FakeDetVLM, but the
     # vision tower and projector default to CPU.  HF Trainer auto-moves these

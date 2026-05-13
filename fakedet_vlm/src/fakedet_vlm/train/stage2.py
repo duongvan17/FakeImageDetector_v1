@@ -123,8 +123,8 @@ def main() -> None:
         report_to=t_cfg["report_to"],
         remove_unused_columns=t_cfg["remove_unused_columns"],
         seed=s_cfg["seed"],
-        dataloader_num_workers=0,
-        dataloader_pin_memory=False,
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True,
     )
 
     class TwoLRTrainer(VLMTrainer):
