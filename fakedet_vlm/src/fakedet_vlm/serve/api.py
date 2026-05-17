@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from fakedet_vlm.data.prompts import IMAGE_PLACEHOLDER, build_chat_prompt
 from fakedet_vlm.models import FakeDetVLM
-from fakedet_vlm.models.vit_loader import CLIP_MEAN, CLIP_STD
+from fakedet_vlm.models.vit_loader import CLIP_MEAN, CLIP_STD, load_vision_classifier
 
 
 _STATE: dict[str, Any] = {}
@@ -59,11 +59,17 @@ def _load_model() -> dict[str, Any]:
         model.projector.load_state_dict(sd)
     model.eval()
 
-    # The 4-bit LLM is placed by device_map; vision tower + projector default
-    # to CPU. Move them to GPU so pixel_values from the request match.
+    # The ORIGINAL binary deepfake classifier (98.8% acc). The verdict
+    # FAKE/REAL comes from this head's sigmoid probability — NOT from
+    # parsing the small LLM's free text (which only explains).
+    classifier = load_vision_classifier(vision_ckpt, image_size).eval()
+
+    # The 4-bit LLM is placed by device_map; vision tower + projector +
+    # classifier default to CPU. Move them to GPU so pixel_values match.
     if device == "cuda" and torch.cuda.is_available():
         model.vision_tower = model.vision_tower.to(device)
         model.projector = model.projector.to(device)
+        classifier = classifier.to(device)
 
     transform = transforms.Compose([
         transforms.Resize((image_size, image_size),
@@ -79,6 +85,7 @@ def _load_model() -> dict[str, Any]:
 
     return {
         "model": model,
+        "classifier": classifier,
         "transform": transform,
         "device": device,
         "max_new_tokens": max_new_tokens,

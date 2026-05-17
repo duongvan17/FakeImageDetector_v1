@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import os
 import time
 import uuid
 from typing import Any
@@ -108,11 +109,59 @@ def list_models() -> dict:
     }
 
 
+def _flatten_content(content: Any) -> str:
+    """OpenAI content -> plain text (drop image parts, keep text)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [p.get("text", "") for p in content if p.get("type") == "text"]
+        return " ".join(t for t in parts if t).strip()
+    return ""
+
+
+def _run_text(messages: list[dict]) -> str:
+    """No image attached → answer with the trained LLM (Qwen2.5+LoRA).
+
+    Used by the FakeDet *system* pipeline for non-image intents
+    (misleading-content / text-to-detect / user-guide): the final answer
+    must still come from the trained model, just its language head rather
+    than the full vision path.
+    """
+    st = _ensure_loaded()
+    model = st["model"]
+    device = st["device"]
+    tok = model.tokenizer
+
+    chat = [
+        {"role": m.get("role", "user"), "content": _flatten_content(m.get("content"))}
+        for m in messages
+        if _flatten_content(m.get("content"))
+    ]
+    if not chat:
+        return ("Please attach an image. This assistant detects whether an "
+                "image is a deepfake and explains the visual artifacts.")
+
+    prompt = tok.apply_chat_template(
+        chat, tokenize=False, add_generation_prompt=True
+    )
+    enc = tok(prompt, return_tensors="pt", add_special_tokens=False)
+    enc = {k: v.to(device) for k, v in enc.items()}
+    max_new = int(os.environ.get("FAKEDET_TEXT_MAX_NEW_TOKENS", "256"))
+    with torch.no_grad():
+        out = model.llm.generate(
+            **enc,
+            max_new_tokens=max_new,
+            do_sample=False,
+            pad_token_id=tok.pad_token_id,
+        )
+    new_tokens = out[0][enc["input_ids"].shape[1]:]
+    return tok.decode(new_tokens, skip_special_tokens=True).strip()
+
+
 def _run(messages: list[dict]) -> str:
     image = _extract_image(messages)
     if image is None:
-        return ("Please attach an image. This assistant detects whether an "
-                "image is a deepfake and explains the visual artifacts.")
+        return _run_text(messages)
 
     st = _ensure_loaded()
     model = st["model"]
@@ -121,6 +170,20 @@ def _run(messages: list[dict]) -> str:
     image.save(tmp, quality=95)
 
     pixel_values = st["transform"](image).unsqueeze(0).to(device)
+
+    # ---- VERDICT: from the vision classifier's sigmoid probability ----
+    # This is the decision (98.8%-acc head), NOT text parsing. Which class
+    # is "fake" wasn't saved in the checkpoint, so it's configurable; flip
+    # FAKEDET_FAKE_POSITIVE=0 if a known real/fake sanity check is inverted.
+    fake_is_positive = os.environ.get("FAKEDET_FAKE_POSITIVE", "1") != "0"
+    threshold = float(os.environ.get("FAKEDET_FAKE_THRESHOLD", "0.5"))
+    with torch.no_grad():
+        p_fake = st["classifier"].fake_prob(pixel_values, fake_is_positive)
+    is_fake = p_fake >= threshold
+    conf = p_fake if is_fake else (1.0 - p_fake)
+    verdict = "🟥 FAKE" if is_fake else "🟩 REAL"
+
+    # ---- EXPLANATION: the trained LLM (free text, may be imperfect) ----
     with torch.no_grad():
         out = model.generate(
             input_ids=st["input_ids"],
@@ -130,11 +193,7 @@ def _run(messages: list[dict]) -> str:
             do_sample=False,
         )
     text = model.tokenizer.decode(out[0], skip_special_tokens=True).strip()
-    is_fake = ("deepfake" in text.lower()) or (
-        "fake" in text.lower() and "authentic" not in text.lower()
-    )
-    verdict = "🟥 FAKE" if is_fake else "🟩 REAL"
-    return f"**{verdict}**\n\n{text}"
+    return f"**{verdict} — {conf * 100:.1f}%**\n\n{text}"
 
 
 @app.post("/v1/chat/completions")

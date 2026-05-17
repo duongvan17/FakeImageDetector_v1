@@ -133,3 +133,63 @@ def build_vision_tower(
         drop_cls=drop_cls,
         strict=strict,
     )
+
+
+class VisionClassifier(nn.Module):
+    """The ORIGINAL binary deepfake classifier from ``best_model.pth``.
+
+    The VLM uses the ViT only as a frozen feature extractor (patch tokens)
+    and *drops* this head. But the real/fake decision must come from this
+    head — it is the 98.8%-acc / 0.999-AUC model the user trained — not
+    from parsing the small LLM's free text. ``head`` is a single logit
+    (768→1); ``sigmoid(logit)`` is the model's confidence for the positive
+    class. Which class is "fake" was fixed at the original training time
+    and is NOT recorded in the checkpoint, so it is left configurable
+    (``fake_is_positive``) and must be sanity-checked on a known
+    real + known fake image.
+    """
+
+    def __init__(self, checkpoint_path: str | Path, image_size: int = 224) -> None:
+        super().__init__()
+        ckpt = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+        state = VisionTowerViTB16._extract_state_dict(ckpt)
+
+        has_norm_pre = "norm_pre.weight" in state
+        has_patch_bias = "patch_embed.proj.bias" in state
+        timm_name = (
+            "vit_base_patch16_clip_224"
+            if (has_norm_pre and not has_patch_bias)
+            else "vit_base_patch16_224"
+        )
+        # num_classes=1 keeps timm's exact train-time forward (token pool +
+        # head) so the logit reproduces the original classifier.
+        self.backbone = timm.create_model(
+            timm_name, pretrained=False, num_classes=1, img_size=image_size
+        )
+        missing, unexpected = self.backbone.load_state_dict(state, strict=False)
+        # head.* MUST be present; anything else missing/unexpected is a bug.
+        if any(not k.startswith("head.") for k in missing) or unexpected:
+            raise RuntimeError(
+                f"Classifier checkpoint mismatch (timm={timm_name}).\n"
+                f"  missing: {missing}\n  unexpected: {unexpected}"
+            )
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+        self.backbone.eval()
+
+    @torch.no_grad()
+    def fake_prob(self, pixel_values: torch.Tensor, fake_is_positive: bool = True) -> float:
+        logit = self.backbone(pixel_values).reshape(-1)[0]
+        p_pos = torch.sigmoid(logit).item()
+        return p_pos if fake_is_positive else (1.0 - p_pos)
+
+    def train(self, mode: bool = True):  # noqa: D401
+        super().train(mode)
+        self.backbone.eval()
+        return self
+
+
+def load_vision_classifier(
+    checkpoint_path: str | Path, image_size: int = 224
+) -> VisionClassifier:
+    return VisionClassifier(checkpoint_path, image_size)
