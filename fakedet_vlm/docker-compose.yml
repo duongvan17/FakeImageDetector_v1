@@ -1,0 +1,55 @@
+# ChatGPT-style UI (open-webui) + FakeDet VLM OpenAI-compatible backend.
+#
+#   docker compose up -d
+#   open http://localhost:3000
+#
+# Backend needs the model files mounted (or it pulls from HF Hub if you
+# bake that in). Vision checkpoint + LoRA adapter are mounted read-only.
+#
+# Requires NVIDIA Container Toolkit for GPU. For CPU-only, delete the
+# `deploy:` block on the backend (inference will be slow).
+
+services:
+  fakedet-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      uvicorn fakedet_vlm.serve.openai_api:app
+      --host 0.0.0.0 --port 8000
+    environment:
+      FAKEDET_VISION_CHECKPOINT: /app/clip_model/best_model.pth
+      FAKEDET_ADAPTER_DIR: /app/runs/stage2_sft/final
+      FAKEDET_PROJECTOR: /app/runs/stage2_sft/final/projector.pt
+      FAKEDET_MAX_NEW_TOKENS: "64"
+      FAKEDET_LAZY_LOAD: "1"          # load model on first request
+    volumes:
+      - ./clip_model:/app/clip_model:ro
+      - ./runs:/app/runs:ro
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    depends_on:
+      - fakedet-backend
+    environment:
+      # Point open-webui's OpenAI connector at our backend.
+      OPENAI_API_BASE_URL: http://fakedet-backend:8000/v1
+      OPENAI_API_KEY: sk-fakedet           # any non-empty string
+      WEBUI_AUTH: "false"                  # skip login for local demo
+    volumes:
+      - openwebui-data:/app/backend/data
+    ports:
+      - "3000:8080"
+    restart: unless-stopped
+
+volumes:
+  openwebui-data:
