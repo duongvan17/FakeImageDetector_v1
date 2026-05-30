@@ -85,14 +85,20 @@ class FakeClueDataset(Dataset):
     """Reads records produced by `scripts/prepare_fakeclue.py`. Tolerates
     several common field names (image_path/image/path, label/target/is_fake)
     because the prep script's schema varies across FakeClue versions.
-    Label convention: **1 = fake**."""
+    Label convention: **1 = fake**.
 
-    def __init__(self, json_path: str, image_root: str, transform):
+    ``max_samples`` truncates to a fixed-seed random subset — used for
+    quick model-comparison runs on a 5k slice instead of full 94k."""
+
+    def __init__(self, json_path: str, image_root: str, transform,
+                 max_samples: int = 0, seed: int = 42):
         with open(json_path, encoding="utf-8") as f:
             self.records = json.load(f)
+        if max_samples and 0 < max_samples < len(self.records):
+            rng = random.Random(seed)
+            self.records = rng.sample(self.records, max_samples)
         self.image_root = Path(image_root)
         self.transform = transform
-        # Probe schema on the first record (fail fast with a clear message).
         if self.records:
             _first_key(self.records[0], _IMAGE_KEYS, "image field")
             _first_key(self.records[0], _LABEL_KEYS, "label field")
@@ -183,6 +189,7 @@ def train(args):
         args.train_json, args.image_root,
         train_transform(no_jpeg=args.no_jpeg, no_randaug=args.no_randaug,
                         no_erasing=args.no_erasing),
+        max_samples=args.max_train_samples, seed=args.seed,
     )
     _log(f"train dataset: {len(train_ds)} samples, image_root={args.image_root}")
     _log(f"loading val json: {args.val_json}")
@@ -222,14 +229,22 @@ def train(args):
     for name, dl in cross_dls.items():
         _log(f"cross-domain '{name}': {len(dl.dataset)} samples")
 
-    # ---- model: CLIP pretrained backbone + fresh head ----
-    _log("calling timm.create_model('vit_base_patch16_clip_224', pretrained=True) ...")
-    _log("(this downloads ~570MB on first run — may take 1-3 min)")
+    # ---- model: timm pretrained backbone + fresh num_classes=1 head ----
+    _log(f"calling timm.create_model('{args.model}', pretrained=True) ...")
+    _log("(may download pretrained weights on first run)")
     t0 = time.time()
-    model = timm.create_model(
-        "vit_base_patch16_clip_224", pretrained=True, num_classes=1
-    )
-    _log(f"model built in {time.time()-t0:.1f}s, params={sum(p.numel() for p in model.parameters())/1e6:.1f}M")
+    # Force 224×224 input for fair head-to-head comparison; some CNN backbones
+    # use larger native sizes (e.g. xception 299, eff-b4 380) which would
+    # change throughput. timm passes img_size through where applicable.
+    try:
+        model = timm.create_model(args.model, pretrained=True,
+                                  num_classes=1, img_size=224)
+    except TypeError:
+        # Models without `img_size` kwarg (most CNNs) — fall back; their
+        # input layer is fully-conv so 224 works anyway.
+        model = timm.create_model(args.model, pretrained=True, num_classes=1)
+    _log(f"model built in {time.time()-t0:.1f}s, "
+         f"params={sum(p.numel() for p in model.parameters())/1e6:.1f}M")
     _log(f"moving model to {device} ...")
     t0 = time.time()
     model = model.to(device)
@@ -237,7 +252,10 @@ def train(args):
 
     # ---- differential LR (head fast, backbone slow) ----
     _log("building optimizer + scheduler ...")
-    head_params = list(model.head.parameters())
+    # timm's get_classifier() returns the final Linear in the head regardless
+    # of arch (ViT.head, ResNet.fc, EfficientNet.classifier, ...).
+    head_module = model.get_classifier()
+    head_params = list(head_module.parameters())
     head_ids = {id(p) for p in head_params}
     backbone_params = [p for p in model.parameters() if id(p) not in head_ids]
     _log(f"head params: {sum(p.numel() for p in head_params)} | "
@@ -422,7 +440,13 @@ def parse_args():
     p.add_argument("--weight-decay",    type=float, default=0.02)
     p.add_argument("--label-smoothing", type=float, default=0.05)
     p.add_argument("--seed",            type=int,   default=42)
-    # ablation toggles
+    # ablation / comparison knobs
+    p.add_argument("--model", default="vit_base_patch16_clip_224",
+                   help="any timm model name (xception, efficientnet_b4, "
+                        "resnet50, convnext_tiny, vit_base_patch16_224, ...)")
+    p.add_argument("--max-train-samples", type=int, default=0,
+                   help="cap train set to this many random samples (0 = all). "
+                        "Use 5000 for quick model-comparison runs.")
     p.add_argument("--no-jpeg",    action="store_true", help="disable JPEG aug")
     p.add_argument("--no-randaug", action="store_true", help="disable RandAugment")
     p.add_argument("--no-erasing", action="store_true", help="disable RandomErasing")
