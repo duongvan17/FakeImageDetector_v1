@@ -39,6 +39,16 @@ def _log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
 
 
+def _fmt_dur(seconds: float) -> str:
+    """Format seconds as a compact h/m/s string."""
+    s = int(max(0, seconds))
+    if s >= 3600:
+        return f"{s//3600}h{(s%3600)//60:02d}m"
+    if s >= 60:
+        return f"{s//60}m{s%60:02d}s"
+    return f"{s}s"
+
+
 _log("importing torch ...")
 import torch  # noqa: E402
 _log(f"torch {torch.__version__}  cuda={torch.cuda.is_available()}")
@@ -246,6 +256,7 @@ def train(args):
     )
 
     _log(f"scheduler ready: warmup_steps={warmup_steps}, total_steps={total_steps}")
+    t_run_start = time.time()
 
     # ---- AMP for RTX 4090 ----
     use_amp = device == "cuda"
@@ -260,11 +271,17 @@ def train(args):
         epoch_loss, n_batches = 0.0, 0
         _log("requesting first batch from DataLoader ...")
         t_batch = time.time()
+        t_epoch_start = time.time()
+        t_window = time.time()       # rolling window timer for step throughput
+        step_times: list[float] = []  # last N step durations
+        WINDOW = 20                   # rolling average over 20 steps
+
         for step, (x, y, _) in enumerate(train_dl):
             if step == 0:
                 _log(f"first batch ready in {time.time()-t_batch:.1f}s, shape={tuple(x.shape)}")
                 _log("moving first batch to GPU + first forward (may take 5-10s) ...")
                 t_first = time.time()
+            t_step = time.time()
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             optim.zero_grad(set_to_none=True)
@@ -279,6 +296,10 @@ def train(args):
                 loss.backward()
             optim.step()
             scheduler.step()
+            step_dur = time.time() - t_step
+            step_times.append(step_dur)
+            if len(step_times) > WINDOW:
+                step_times.pop(0)
             if step == 0:
                 _log(f"first forward+backward+step done in {time.time()-t_first:.2f}s, loss={loss.item():.4f}")
             epoch_loss += loss.item()
@@ -288,23 +309,39 @@ def train(args):
             if step % log_every == 0:
                 lr_h = optim.param_groups[0]["lr"]
                 lr_b = optim.param_groups[1]["lr"]
+                avg_step = sum(step_times) / len(step_times)   # seconds
+                imgs_per_s = args.batch_size / avg_step
+                # Remaining time: this epoch + future epochs
+                steps_left_epoch = steps_per_epoch - step - 1
+                steps_left_total = steps_left_epoch + (args.epochs - epoch) * steps_per_epoch
+                eta_sec = steps_left_total * avg_step
                 _log(f"E{epoch} step {step:>4}/{steps_per_epoch}  "
-                     f"loss={loss.item():.4f}  lr_head={lr_h:.2e} lr_bb={lr_b:.2e}")
+                     f"loss={loss.item():.4f}  lr_h={lr_h:.1e} lr_bb={lr_b:.1e}  "
+                     f"step={avg_step*1000:.0f}ms ({imgs_per_s:.0f} img/s)  "
+                     f"ETA={_fmt_dur(eta_sec)}")
+
+        epoch_train_dur = time.time() - t_epoch_start
 
         # ---- validation ----
+        _log(f"E{epoch} train done in {_fmt_dur(epoch_train_dur)}, running val ...")
+        t_val = time.time()
         val_acc, val_auc = evaluate(model, val_dl, device)
         cross_metrics = {name: evaluate(model, dl, device) for name, dl in cross_dls.items()}
+        val_dur = time.time() - t_val
 
         # Score = mean acc across in-domain + cross-domain (save by THIS, not in-domain alone)
         all_accs = [val_acc] + [m[0] for m in cross_metrics.values()]
         score = sum(all_accs) / len(all_accs)
 
-        log = [f"E{epoch}  loss={epoch_loss/n_batches:.4f}",
+        log = [f"E{epoch}/{args.epochs}",
+               f"loss={epoch_loss/n_batches:.4f}",
                f"val={val_acc:.4f}/{val_auc:.4f}"]
         for name, (ca, cu) in cross_metrics.items():
             log.append(f"{name}={ca:.4f}/{cu:.4f}")
         log.append(f"score={score:.4f}")
-        print(" | ".join(log))
+        log.append(f"train={_fmt_dur(epoch_train_dur)}")
+        log.append(f"val={_fmt_dur(val_dur)}")
+        _log("  ".join(log))
 
         # ---- save best (by combined score) ----
         if score > best_score:
@@ -332,8 +369,9 @@ def train(args):
             "acc": val_acc, "auc": val_auc,
         }, out_dir / "last_model_v2.pth")
 
-    print(f"\nDONE. best combined score = {best_score:.4f}")
-    print(f"Checkpoint: {out_dir/'best_model_v2.pth'}")
+    _log(f"DONE. total wall time = {_fmt_dur(time.time()-t_run_start)}, "
+         f"best combined score = {best_score:.4f}")
+    _log(f"Checkpoint: {out_dir/'best_model_v2.pth'}")
 
 
 # ------------------------------------------------------------------- cli
