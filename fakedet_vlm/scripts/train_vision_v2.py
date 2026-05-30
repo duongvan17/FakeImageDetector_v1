@@ -28,17 +28,31 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
+import time
 from pathlib import Path
 
-import timm
-import torch
-import torch.nn.functional as F
-from PIL import Image
-from sklearn.metrics import roc_auc_score
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.utils.data import DataLoader, Dataset
-from torchvision.transforms import v2
+
+# Print to stderr is line-buffered even when stdout is piped to `tee`.
+# Use this for "where am I?" markers so they always appear in real-time.
+def _log(msg: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr, flush=True)
+
+
+_log("importing torch ...")
+import torch  # noqa: E402
+_log(f"torch {torch.__version__}  cuda={torch.cuda.is_available()}")
+
+_log("importing timm + torchvision + sklearn + PIL ...")
+import timm  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from PIL import Image  # noqa: E402
+from sklearn.metrics import roc_auc_score  # noqa: E402
+from torch.optim import AdamW  # noqa: E402
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR  # noqa: E402
+from torch.utils.data import DataLoader, Dataset  # noqa: E402
+from torchvision.transforms import v2  # noqa: E402
+_log("all imports done")
 
 # CLIP-OpenAI normalization stats (matches CLIP-ViT-B/16 pretraining).
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
@@ -139,13 +153,23 @@ def evaluate(model, loader, device) -> tuple[float, float]:
 
 # ----------------------------------------------------------------- train
 def train(args):
+    _log(f"train() entered, args={vars(args)}")
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    _log(f"device = {device}")
+    if device == "cuda":
+        _log(f"GPU: {torch.cuda.get_device_name(0)}, "
+             f"{torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     torch.manual_seed(args.seed)
     random.seed(args.seed)
 
     # ---- data ----
+    _log(f"loading train json: {args.train_json}")
     train_ds = FakeClueDataset(args.train_json, args.image_root, train_transform())
+    _log(f"train dataset: {len(train_ds)} samples, image_root={args.image_root}")
+    _log(f"loading val json: {args.val_json}")
     val_ds = FakeClueDataset(args.val_json, args.image_root, eval_transform())
+    _log(f"val dataset: {len(val_ds)} samples")
+    _log(f"building DataLoaders (num_workers={args.num_workers})")
     train_dl = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, pin_memory=True, drop_last=True,
@@ -154,6 +178,7 @@ def train(args):
         val_ds, batch_size=args.batch_size * 2, shuffle=False,
         num_workers=args.num_workers, pin_memory=True,
     )
+    _log(f"DataLoaders ready: train batches={len(train_dl)}, val batches={len(val_dl)}")
 
     # Optional cross-domain val sets (Celeb-DF / DFDC). Same JSON schema.
     cross_dls = {}
@@ -169,24 +194,35 @@ def train(args):
             )
 
     # ---- class-balanced BCE ----
+    _log("counting class distribution ...")
     n_fake = sum(1 for rec in train_ds.records
                  if float(_first_key(rec, _LABEL_KEYS, "label field")) == 1.0)
     n_real = len(train_ds.records) - n_fake
     pos_weight = torch.tensor([n_real / max(n_fake, 1)], device=device)
-    print(f"train: {len(train_ds)} samples  fake={n_fake}  real={n_real}  "
-          f"pos_weight={pos_weight.item():.3f}")
+    _log(f"class: fake={n_fake}  real={n_real}  pos_weight={pos_weight.item():.3f}")
     for name, dl in cross_dls.items():
-        print(f"  cross-domain '{name}': {len(dl.dataset)} samples")
+        _log(f"cross-domain '{name}': {len(dl.dataset)} samples")
 
     # ---- model: CLIP pretrained backbone + fresh head ----
+    _log("calling timm.create_model('vit_base_patch16_clip_224', pretrained=True) ...")
+    _log("(this downloads ~570MB on first run — may take 1-3 min)")
+    t0 = time.time()
     model = timm.create_model(
         "vit_base_patch16_clip_224", pretrained=True, num_classes=1
-    ).to(device)
+    )
+    _log(f"model built in {time.time()-t0:.1f}s, params={sum(p.numel() for p in model.parameters())/1e6:.1f}M")
+    _log(f"moving model to {device} ...")
+    t0 = time.time()
+    model = model.to(device)
+    _log(f"moved to {device} in {time.time()-t0:.1f}s")
 
     # ---- differential LR (head fast, backbone slow) ----
+    _log("building optimizer + scheduler ...")
     head_params = list(model.head.parameters())
     head_ids = {id(p) for p in head_params}
     backbone_params = [p for p in model.parameters() if id(p) not in head_ids]
+    _log(f"head params: {sum(p.numel() for p in head_params)} | "
+         f"backbone params: {sum(p.numel() for p in backbone_params)}")
     optim = AdamW(
         [
             {"params": head_params,     "lr": args.lr_head},
@@ -209,16 +245,24 @@ def train(args):
         milestones=[warmup_steps],
     )
 
+    _log(f"scheduler ready: warmup_steps={warmup_steps}, total_steps={total_steps}")
+
     # ---- AMP for RTX 4090 ----
     use_amp = device == "cuda"
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     best_score = -1.0
+    _log(f"starting training loop (epochs={args.epochs}, AMP={use_amp})")
 
     for epoch in range(1, args.epochs + 1):
+        _log(f"=== EPOCH {epoch}/{args.epochs} ===")
         model.train()
         epoch_loss, n_batches = 0.0, 0
+        _log("requesting first batch from DataLoader ...")
+        t_batch = time.time()
         for step, (x, y, _) in enumerate(train_dl):
+            if step == 0:
+                _log(f"first batch ready in {time.time()-t_batch:.1f}s, shape={tuple(x.shape)}")
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             optim.zero_grad(set_to_none=True)
@@ -309,4 +353,5 @@ def parse_args():
 
 
 if __name__ == "__main__":
+    _log("__main__ entered, parsing args ...")
     train(parse_args())
