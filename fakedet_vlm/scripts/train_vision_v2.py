@@ -263,6 +263,8 @@ def train(args):
         for step, (x, y, _) in enumerate(train_dl):
             if step == 0:
                 _log(f"first batch ready in {time.time()-t_batch:.1f}s, shape={tuple(x.shape)}")
+                _log("moving first batch to GPU + first forward (may take 5-10s) ...")
+                t_first = time.time()
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
             optim.zero_grad(set_to_none=True)
@@ -277,13 +279,17 @@ def train(args):
                 loss.backward()
             optim.step()
             scheduler.step()
+            if step == 0:
+                _log(f"first forward+backward+step done in {time.time()-t_first:.2f}s, loss={loss.item():.4f}")
             epoch_loss += loss.item()
             n_batches += 1
-            if step % 50 == 0:
+            # log frequently in epoch 1 to confirm progress; less verbose after
+            log_every = 10 if epoch == 1 and step < 100 else 50
+            if step % log_every == 0:
                 lr_h = optim.param_groups[0]["lr"]
                 lr_b = optim.param_groups[1]["lr"]
-                print(f"[E{epoch}][{step:>4}/{steps_per_epoch}] "
-                      f"loss={loss.item():.4f} lr_head={lr_h:.2e} lr_bb={lr_b:.2e}")
+                _log(f"E{epoch} step {step:>4}/{steps_per_epoch}  "
+                     f"loss={loss.item():.4f}  lr_head={lr_h:.2e} lr_bb={lr_b:.2e}")
 
         # ---- validation ----
         val_acc, val_auc = evaluate(model, val_dl, device)
