@@ -46,24 +46,42 @@ CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
 
 # ----------------------------------------------------------------- dataset
+_IMAGE_KEYS = ("image_path", "image", "img_path", "img", "path", "file", "filename")
+_LABEL_KEYS = ("label", "y", "target", "is_fake", "fake")
+
+
+def _first_key(rec: dict, names: tuple[str, ...], where: str):
+    for k in names:
+        if k in rec:
+            return rec[k]
+    raise KeyError(f"{where}: no field in {names!r}; record keys = {list(rec.keys())}")
+
+
 class FakeClueDataset(Dataset):
-    """Reads records produced by `scripts/prepare_fakeclue.py`. Each record:
-       {image_path: str (relative to image_root), label: 0|1, category?: str}
-       Label convention: **1 = fake** (already flipped during prep)."""
+    """Reads records produced by `scripts/prepare_fakeclue.py`. Tolerates
+    several common field names (image_path/image/path, label/target/is_fake)
+    because the prep script's schema varies across FakeClue versions.
+    Label convention: **1 = fake**."""
 
     def __init__(self, json_path: str, image_root: str, transform):
         with open(json_path, encoding="utf-8") as f:
             self.records = json.load(f)
         self.image_root = Path(image_root)
         self.transform = transform
+        # Probe schema on the first record (fail fast with a clear message).
+        if self.records:
+            _first_key(self.records[0], _IMAGE_KEYS, "image field")
+            _first_key(self.records[0], _LABEL_KEYS, "label field")
 
     def __len__(self) -> int:
         return len(self.records)
 
     def __getitem__(self, idx: int):
         r = self.records[idx]
-        img = Image.open(self.image_root / r["image_path"]).convert("RGB")
-        return self.transform(img), float(r["label"]), r.get("category", "")
+        img_path = _first_key(r, _IMAGE_KEYS, "image field")
+        label = _first_key(r, _LABEL_KEYS, "label field")
+        img = Image.open(self.image_root / img_path).convert("RGB")
+        return self.transform(img), float(label), r.get("category", "")
 
 
 # -------------------------------------------------------------- transforms
@@ -151,7 +169,8 @@ def train(args):
             )
 
     # ---- class-balanced BCE ----
-    n_fake = sum(1 for rec in train_ds.records if rec["label"] == 1)
+    n_fake = sum(1 for rec in train_ds.records
+                 if float(_first_key(rec, _LABEL_KEYS, "label field")) == 1.0)
     n_real = len(train_ds.records) - n_fake
     pos_weight = torch.tensor([n_real / max(n_fake, 1)], device=device)
     print(f"train: {len(train_ds)} samples  fake={n_fake}  real={n_real}  "
