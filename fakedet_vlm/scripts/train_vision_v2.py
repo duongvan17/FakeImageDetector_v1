@@ -317,15 +317,22 @@ def train(args):
                 steps_left_epoch = steps_per_epoch - step - 1
                 steps_left_total = steps_left_epoch + (args.epochs - epoch) * steps_per_epoch
                 eta_sec = steps_left_total * wall_per_step
-                # GPU stats — VRAM always; util may fail if pynvml missing.
+                # GPU stats — show CURRENT and PEAK VRAM in the window.
+                # PyTorch frees activations after backward, so memory_allocated
+                # alone hides the real fwd+bwd peak that determines how big a
+                # batch you can run. Reset peak each log window for fresh read.
                 if device == "cuda":
                     vram_gb = torch.cuda.memory_allocated(0) / 1e9
+                    peak_gb = torch.cuda.max_memory_allocated(0) / 1e9
                     vram_tot = torch.cuda.get_device_properties(0).total_memory / 1e9
+                    torch.cuda.reset_peak_memory_stats(0)
                     try:
                         util = torch.cuda.utilization(0)
-                        gpu_part = f"  GPU={vram_gb:.1f}/{vram_tot:.0f}GB {util}%"
+                        gpu_part = (f"  VRAM cur={vram_gb:.1f}GB peak={peak_gb:.1f}/"
+                                    f"{vram_tot:.0f}GB util={util}%")
                     except Exception:  # noqa: BLE001
-                        gpu_part = f"  VRAM={vram_gb:.1f}/{vram_tot:.0f}GB"
+                        gpu_part = (f"  VRAM cur={vram_gb:.1f}GB peak={peak_gb:.1f}/"
+                                    f"{vram_tot:.0f}GB")
                 else:
                     gpu_part = ""
                 _log(f"E{epoch} step {step:>4}/{steps_per_epoch}  "
