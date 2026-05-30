@@ -309,16 +309,29 @@ def train(args):
             if step % log_every == 0:
                 lr_h = optim.param_groups[0]["lr"]
                 lr_b = optim.param_groups[1]["lr"]
-                avg_step = sum(step_times) / len(step_times)   # seconds
-                imgs_per_s = args.batch_size / avg_step
-                # Remaining time: this epoch + future epochs
+                avg_step = sum(step_times) / len(step_times)   # seconds compute
+                # Wall time per step (includes data load) — what really matters
+                # for ETA. step >=1 only (need elapsed since epoch start).
+                wall_per_step = (time.time() - t_epoch_start) / (step + 1)
+                imgs_per_s = args.batch_size / wall_per_step
                 steps_left_epoch = steps_per_epoch - step - 1
                 steps_left_total = steps_left_epoch + (args.epochs - epoch) * steps_per_epoch
-                eta_sec = steps_left_total * avg_step
+                eta_sec = steps_left_total * wall_per_step
+                # GPU stats — VRAM always; util may fail if pynvml missing.
+                if device == "cuda":
+                    vram_gb = torch.cuda.memory_allocated(0) / 1e9
+                    vram_tot = torch.cuda.get_device_properties(0).total_memory / 1e9
+                    try:
+                        util = torch.cuda.utilization(0)
+                        gpu_part = f"  GPU={vram_gb:.1f}/{vram_tot:.0f}GB {util}%"
+                    except Exception:  # noqa: BLE001
+                        gpu_part = f"  VRAM={vram_gb:.1f}/{vram_tot:.0f}GB"
+                else:
+                    gpu_part = ""
                 _log(f"E{epoch} step {step:>4}/{steps_per_epoch}  "
                      f"loss={loss.item():.4f}  lr_h={lr_h:.1e} lr_bb={lr_b:.1e}  "
-                     f"step={avg_step*1000:.0f}ms ({imgs_per_s:.0f} img/s)  "
-                     f"ETA={_fmt_dur(eta_sec)}")
+                     f"compute={avg_step*1000:.0f}ms  wall={wall_per_step*1000:.0f}ms "
+                     f"({imgs_per_s:.0f} img/s){gpu_part}  ETA={_fmt_dur(eta_sec)}")
 
         epoch_train_dur = time.time() - t_epoch_start
 
