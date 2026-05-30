@@ -109,20 +109,25 @@ class FakeClueDataset(Dataset):
 
 
 # -------------------------------------------------------------- transforms
-def train_transform():
+def train_transform(no_jpeg: bool = False, no_randaug: bool = False,
+                    no_erasing: bool = False):
     # v2.JPEG requires torchvision ≥ 0.17. PIL→Tensor first so v2 ops compose.
-    return v2.Compose([
+    ops = [
         v2.PILToTensor(),
         v2.Resize(256, interpolation=v2.InterpolationMode.BICUBIC, antialias=True),
         v2.RandomResizedCrop(224, scale=(0.7, 1.0), antialias=True),
         v2.RandomHorizontalFlip(),
-        v2.RandAugment(num_ops=2, magnitude=9),
-        v2.JPEG(quality=(40, 95)),        # ★ break the compression-quality shortcut
-        v2.GaussianBlur(3, sigma=(0.1, 0.5)),
-        v2.ToDtype(torch.float32, scale=True),
-        v2.Normalize(CLIP_MEAN, CLIP_STD),
-        v2.RandomErasing(p=0.25),
-    ])
+    ]
+    if not no_randaug:
+        ops.append(v2.RandAugment(num_ops=2, magnitude=9))
+    if not no_jpeg:
+        ops.append(v2.JPEG(quality=(40, 95)))       # ★ break the compression shortcut
+    ops.append(v2.GaussianBlur(3, sigma=(0.1, 0.5)))
+    ops.append(v2.ToDtype(torch.float32, scale=True))
+    ops.append(v2.Normalize(CLIP_MEAN, CLIP_STD))
+    if not no_erasing:
+        ops.append(v2.RandomErasing(p=0.25))
+    return v2.Compose(ops)
 
 
 def eval_transform():
@@ -174,7 +179,11 @@ def train(args):
 
     # ---- data ----
     _log(f"loading train json: {args.train_json}")
-    train_ds = FakeClueDataset(args.train_json, args.image_root, train_transform())
+    train_ds = FakeClueDataset(
+        args.train_json, args.image_root,
+        train_transform(no_jpeg=args.no_jpeg, no_randaug=args.no_randaug,
+                        no_erasing=args.no_erasing),
+    )
     _log(f"train dataset: {len(train_ds)} samples, image_root={args.image_root}")
     _log(f"loading val json: {args.val_json}")
     val_ds = FakeClueDataset(args.val_json, args.image_root, eval_transform())
@@ -413,6 +422,10 @@ def parse_args():
     p.add_argument("--weight-decay",    type=float, default=0.02)
     p.add_argument("--label-smoothing", type=float, default=0.05)
     p.add_argument("--seed",            type=int,   default=42)
+    # ablation toggles
+    p.add_argument("--no-jpeg",    action="store_true", help="disable JPEG aug")
+    p.add_argument("--no-randaug", action="store_true", help="disable RandAugment")
+    p.add_argument("--no-erasing", action="store_true", help="disable RandomErasing")
     return p.parse_args()
 
 
