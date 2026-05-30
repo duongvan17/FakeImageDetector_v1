@@ -76,9 +76,12 @@ def run_one(llm_name: str, args: argparse.Namespace) -> dict:
         n = make_subset(args.train_json, train_sub, args.max_train_samples, args.seed)
         _log(f"made subset {train_sub} ({n} samples)")
 
-    # base.yaml — swap LLM, point at subset.
+    # base.yaml — swap LLM, point at subset + vision ckpt override.
+    model_patch = {"llm_name": llm_name}
+    if args.vision_checkpoint:
+        model_patch["vision_checkpoint"] = args.vision_checkpoint
     patch_yaml(base_src, base_dst, {
-        "model": {"llm_name": llm_name},
+        "model": model_patch,
         "data":  {"train_json": train_sub},
     })
 
@@ -133,6 +136,9 @@ def main() -> None:
     p.add_argument("--llms", nargs="+", required=True,
                    help="HF model ids, e.g. Qwen/Qwen2.5-0.5B-Instruct")
     p.add_argument("--train-json",   default="data/train.json")
+    p.add_argument("--vision-checkpoint", default="",
+                   help="override model.vision_checkpoint in base config "
+                        "(empty = leave as configured)")
     p.add_argument("--output-root",  default="runs/llm_cmp")
     p.add_argument("--max-train-samples", type=int, default=5000)
     p.add_argument("--stage1-epochs", type=int, default=1)
