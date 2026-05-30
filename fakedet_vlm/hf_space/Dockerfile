@@ -21,6 +21,8 @@ RUN pip install --no-cache-dir \
     python-multipart
 
 # The model code (no deps — we installed exactly what serving needs above).
+# Bump REBUILD to force a fresh pull of the latest GitHub main.
+ARG REBUILD=2
 RUN pip install --no-cache-dir --no-deps \
     "git+https://github.com/duongvan17/FakeImageDetector_v1.git#subdirectory=fakedet_vlm"
 
