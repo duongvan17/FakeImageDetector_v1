@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fakedet_system"
+version = "0.1.0"
+description = "Thesis system around the FakeDet VLM: a linear Haystack pipeline (intent -> memory -> prompt -> trained model). NOT agentic."
+requires-python = ">=3.10"
+# Deliberately light: this package runs on the LOCAL 4 GB box. It never
+# imports torch / the model. The trained model lives behind an HTTP backend
+# (fakedet_vlm.serve) on a cloud GPU; this package only talks to it.
+dependencies = [
+  "haystack-ai>=2.6,<3.0",
+  "httpx>=0.27",
+  "pydantic>=2.6",
+  "python-dotenv>=1.0",
+  "pyyaml>=6",
+  # observability: trace every component (intent, memory, responder, ...).
+  # Auto-reads LANGFUSE_HOST / LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY.
+  # Pin to v1.x — it speaks the Langfuse v2 server API; v5+ requires the
+  # heavier v3 server stack (clickhouse + redis + minio).
+  "langfuse-haystack>=1.0,<2.0",
+  "langfuse>=2,<3",
+  "chromadb>=0.5.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "respx>=0.21"]
+serve = ["fastapi>=0.115", "uvicorn>=0.30"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

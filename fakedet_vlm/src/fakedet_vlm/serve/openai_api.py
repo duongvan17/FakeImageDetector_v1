@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from .api import _load_model, _STATE
 
 MODEL_ID = "fakedet-vlm"
+MODEL_ID_V2 = "fakedet-vlm-v2"
 
 
 def _ensure_loaded() -> dict[str, Any]:
@@ -98,15 +99,21 @@ def health() -> dict:
 
 @app.get("/v1/models")
 def list_models() -> dict:
-    return {
-        "object": "list",
-        "data": [{
-            "id": MODEL_ID,
+    _ensure_loaded()
+    models = [{
+        "id": MODEL_ID,
+        "object": "model",
+        "created": 0,
+        "owned_by": "fakedet",
+    }]
+    if "classifier_v2" in _STATE:
+        models.append({
+            "id": MODEL_ID_V2,
             "object": "model",
             "created": 0,
             "owned_by": "fakedet",
-        }],
-    }
+        })
+    return {"object": "list", "data": models}
 
 
 def _flatten_content(content: Any) -> str:
@@ -158,7 +165,7 @@ def _run_text(messages: list[dict]) -> str:
     return tok.decode(new_tokens, skip_special_tokens=True).strip()
 
 
-def _run(messages: list[dict]) -> str:
+def _run(messages: list[dict], model_id: str = "") -> str:
     image = _extract_image(messages)
     if image is None:
         return _run_text(messages)
@@ -172,13 +179,19 @@ def _run(messages: list[dict]) -> str:
     pixel_values = st["transform"](image).unsqueeze(0).to(device)
 
     # ---- VERDICT: from the vision classifier's sigmoid probability ----
-    # This is the decision (98.8%-acc head), NOT text parsing. Which class
-    # is "fake" wasn't saved in the checkpoint, so it's configurable; flip
-    # FAKEDET_FAKE_POSITIVE=0 if a known real/fake sanity check is inverted.
+    # Pick v2 classifier when the client requests the v2 model ID and the
+    # v2 checkpoint was loaded; otherwise fall back to v1.
+    use_v2 = (
+        model_id == MODEL_ID_V2
+        and "classifier_v2" in st
+    )
+    classifier = st["classifier_v2"] if use_v2 else st["classifier"]
+    version_tag = "v2" if use_v2 else "v1"
+
     fake_is_positive = os.environ.get("FAKEDET_FAKE_POSITIVE", "1") != "0"
     threshold = float(os.environ.get("FAKEDET_FAKE_THRESHOLD", "0.5"))
     with torch.no_grad():
-        p_fake = st["classifier"].fake_prob(pixel_values, fake_is_positive)
+        p_fake = classifier.fake_prob(pixel_values, fake_is_positive)
     is_fake = p_fake >= threshold
     conf = p_fake if is_fake else (1.0 - p_fake)
     verdict = "🟥 FAKE" if is_fake else "🟩 REAL"
@@ -193,12 +206,12 @@ def _run(messages: list[dict]) -> str:
             do_sample=False,
         )
     text = model.tokenizer.decode(out[0], skip_special_tokens=True).strip()
-    return f"**{verdict} — {conf * 100:.1f}%**\n\n{text}"
+    return f"**{verdict} — {conf * 100:.1f}% [{version_tag}]**\n\n{text}"
 
 
 @app.post("/v1/chat/completions")
 def chat_completions(req: ChatRequest) -> dict:
-    answer = _run(req.messages)
+    answer = _run(req.messages, model_id=req.model or MODEL_ID)
     now = int(time.time())
     cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     # Non-streaming response is enough for open-webui / LibreChat.
@@ -213,4 +226,53 @@ def chat_completions(req: ChatRequest) -> dict:
             "finish_reason": "stop",
         }],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+class EmbedRequest(BaseModel):
+    model: str = MODEL_ID
+    input: str | list[str]
+
+@app.post("/v1/embeddings")
+def embeddings(req: EmbedRequest) -> dict:
+    """Internal endpoint to extract 768-d ViT features for image-based RAG.
+    
+    Accepts an image as a base64 data URI in the `input` field.
+    """
+    inputs = [req.input] if isinstance(req.input, str) else req.input
+    # Find the first data URI
+    data_uri = ""
+    for idx, inp in enumerate(inputs):
+        if inp.startswith("data:image/"):
+            data_uri = inp
+            break
+            
+    if not data_uri:
+        return {"error": "No image data URI found in input"}
+        
+    try:
+        b64 = data_uri.split(",", 1)[1]
+        raw = base64.b64decode(b64)
+        image = Image.open(io.BytesIO(raw)).convert("RGB")
+    except Exception as e:
+        return {"error": f"Invalid image data: {e}"}
+
+    st = _ensure_loaded()
+    device = st["device"]
+    pixel_values = st["transform"](image).unsqueeze(0).to(device)
+    
+    use_v2 = (req.model == MODEL_ID_V2 and "classifier_v2" in st)
+    classifier = st["classifier_v2"] if use_v2 else st["classifier"]
+    
+    with torch.no_grad():
+        vector = classifier.embed_image(pixel_values)
+        
+    return {
+        "object": "list",
+        "data": [{
+            "object": "embedding",
+            "index": 0,
+            "embedding": vector,
+        }],
+        "model": req.model,
+        "usage": {"prompt_tokens": 0, "total_tokens": 0}
     }

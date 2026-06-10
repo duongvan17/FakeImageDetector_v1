@@ -1,0 +1,70 @@
+
+services:
+  fakedet-system:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      FAKEDET_MEMORY_DB: /app/runs/fakedet_memory.sqlite
+      LANGFUSE_HOST: http://langfuse:3000   # in-network address of the langfuse service
+      HAYSTACK_CONTENT_TRACING_ENABLED: "true"   # span input/output capture
+    volumes:
+      - ./runs:/app/runs           # persist conversation memory + last image
+      - ./src:/app/src:ro          # editable install — `restart` picks up code changes
+    expose:
+      - "9000"
+    restart: unless-stopped
+
+  langfuse-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-db:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  langfuse:
+    image: langfuse/langfuse:2
+    depends_on:
+      - langfuse-db
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: fakedet-langfuse-nextauth-secret-please-rotate
+      SALT: fakedet-langfuse-salt-please-rotate-too
+      NEXTAUTH_URL: http://localhost:3000
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    depends_on:
+      - fakedet-system
+    environment:
+      # Talk to fakedet-system over the compose network (NOT to the HF Space).
+      OPENAI_API_BASE_URL: http://fakedet-system:9000/v1
+      OPENAI_API_KEY: sk-fakedet
+      WEBUI_AUTH: "false"
+      WEBUI_NAME: FakeDet
+      # Disable open-webui's hidden extra LLM calls (title / tags / follow-up /
+      # autocomplete / RAG-query / web-search-query). Each one would otherwise
+      # bounce through fakedet-system and possibly the slow Space.
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
+      ENABLE_SEARCH_QUERY_GENERATION: "false"
+    ports:
+      - "8088:8080"
+    volumes:
+      - openwebui-data:/app/backend/data
+    restart: unless-stopped
+
+volumes:
+  openwebui-data:
+  langfuse-db:

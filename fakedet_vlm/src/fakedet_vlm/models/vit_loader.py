@@ -183,6 +183,16 @@ class VisionClassifier(nn.Module):
         p_pos = torch.sigmoid(logit).item()
         return p_pos if fake_is_positive else (1.0 - p_pos)
 
+    @torch.no_grad()
+    def embed_image(self, pixel_values: torch.Tensor) -> list[float]:
+        """Extract the 768-d CLS token representation for similarity search (RAG)."""
+        feats = self.backbone.forward_features(pixel_values)
+        # If it returns the full sequence (B, N, D), take the CLS token (index 0).
+        # If timm already pooled it to (B, D), it will be 2D.
+        if feats.dim() == 3:
+            feats = feats[:, 0, :]
+        return feats[0].cpu().tolist()
+
     def train(self, mode: bool = True):  # noqa: D401
         super().train(mode)
         self.backbone.eval()

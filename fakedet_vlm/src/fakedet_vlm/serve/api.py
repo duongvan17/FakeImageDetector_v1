@@ -1,12 +1,18 @@
 """FastAPI deepfake detection service.
 
 Configuration via environment variables:
-  FAKEDET_LLM_NAME          (default: Qwen/Qwen2.5-1.5B-Instruct)
-  FAKEDET_VISION_CHECKPOINT (default: ./clip_model/best_model.pth)
-  FAKEDET_ADAPTER_DIR       (default: ./runs/stage2_sft/final)
-  FAKEDET_PROJECTOR         (default: ./runs/stage2_sft/final/projector.pt)
-  FAKEDET_DEVICE            (default: cuda if available else cpu)
-  FAKEDET_MAX_NEW_TOKENS    (default: 96)
+  FAKEDET_LLM_NAME                 (default: Qwen/Qwen2.5-1.5B-Instruct)
+  FAKEDET_VISION_CHECKPOINT        (default: ./clip_model/best_model.pth)
+  FAKEDET_CLASSIFIER_CHECKPOINT_V2 (default: empty — set to load v2 classifier)
+  FAKEDET_ADAPTER_DIR              (default: ./runs/stage2_sft/final)
+  FAKEDET_PROJECTOR                (default: ./runs/stage2_sft/final/projector.pt)
+  FAKEDET_DEVICE                   (default: cuda if available else cpu)
+  FAKEDET_MAX_NEW_TOKENS           (default: 96)
+
+When FAKEDET_CLASSIFIER_CHECKPOINT_V2 is set, the server exposes TWO model
+IDs (``fakedet-vlm`` and ``fakedet-vlm-v2``) — clients pick which classifier
+produces the FAKE/REAL verdict. The VLM text explanation always uses v1 ViT
+(the projector + LoRA were trained with v1 features).
 
 Run:
   uvicorn fakedet_vlm.serve.api:app --host 0.0.0.0 --port 8000
@@ -64,12 +70,22 @@ def _load_model() -> dict[str, Any]:
     # parsing the small LLM's free text (which only explains).
     classifier = load_vision_classifier(vision_ckpt, image_size).eval()
 
+    # ---- v2 classifier (improved anti-overfit recipe) ----
+    # Loaded ONLY when the env var is set. The VLM text generation still
+    # uses v1 ViT as vision tower (projector + LoRA trained with v1).
+    vision_ckpt_v2 = os.environ.get("FAKEDET_CLASSIFIER_CHECKPOINT_V2", "")
+    classifier_v2 = None
+    if vision_ckpt_v2 and Path(vision_ckpt_v2).exists():
+        classifier_v2 = load_vision_classifier(vision_ckpt_v2, image_size).eval()
+
     # The 4-bit LLM is placed by device_map; vision tower + projector +
     # classifier default to CPU. Move them to GPU so pixel_values match.
     if device == "cuda" and torch.cuda.is_available():
         model.vision_tower = model.vision_tower.to(device)
         model.projector = model.projector.to(device)
         classifier = classifier.to(device)
+        if classifier_v2 is not None:
+            classifier_v2 = classifier_v2.to(device)
 
     transform = transforms.Compose([
         transforms.Resize((image_size, image_size),
@@ -83,7 +99,7 @@ def _load_model() -> dict[str, Any]:
     prefix = prefix.replace(IMAGE_PLACEHOLDER, IMAGE_PLACEHOLDER * num_visual_tokens, 1)
     enc = model.tokenizer(prefix, return_tensors="pt", add_special_tokens=False)
 
-    return {
+    state = {
         "model": model,
         "classifier": classifier,
         "transform": transform,
@@ -92,6 +108,9 @@ def _load_model() -> dict[str, Any]:
         "input_ids": enc["input_ids"].to(device),
         "attention_mask": enc["attention_mask"].to(device),
     }
+    if classifier_v2 is not None:
+        state["classifier_v2"] = classifier_v2
+    return state
 
 
 @asynccontextmanager
